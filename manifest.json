@@ -1,0 +1,9 @@
+{
+    "domain": "xmeye",
+    "config_flow": true,
+    "name": "Generic XMEye camera",
+    "documentation": "https://szosti.eu",
+    "codeowners": "@nyxnyx",
+    "dependencies": [],
+    "requirements": ["dvrip==0.0.3"]
+}
