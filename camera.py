@@ -6,8 +6,9 @@ import os, signal
 from stat import S_IRUSR, S_IWUSR
 from shutil import copyfileobj
 import asyncio
+import aiofiles
 
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, DEFAULT_CONTENT_TYPE
 
 import voluptuous as vol
 
@@ -61,23 +62,42 @@ async def async_setup_platform(hass, config, async_add_entities,
 class XMEye_Camera(Camera):
     
     def __init__(self, hass, client, channel, remote):
-        super().__init__()
         
+        super(XMEye_Camera, self).__init__()
         self._hass = hass
         self._client = client
         self._ffmpeg_manager = hass.data['ffmpeg']
         self._remote = remote
         self._info = self._client.systeminfo()
-        self._channel = channel
+        self._channel = int(channel)
         self._name = "%s_%i" % (self._info.board, channel)
         self._sock = Socket(AF_INET, SOCK_STREAM) # for streaming video
         self._sock.connect(self._remote)
         from dvrip.monitor import Stream
-        self._reader = lambda: self._client.monitor(self._sock, self._channel, Stream["HD"])
+        self._reader = lambda: self._client.monitor(self._sock, self._channel, Stream.HD)
+        self._in = None
         self._named_pipe = "/tmp/" + self._name
         if os.path.exists(self._named_pipe):
             os.unlink(self._named_pipe)
         os.mkfifo(self._named_pipe, S_IRUSR|S_IWUSR)
+        self.setup_reader()
+        import threading
+        #self._thread = threading.Thread(target = async_reader_job, 
+        #                                args = (self._named_pipe, self._reader, self._hass,))
+        #self._thread.start()
+
+    def setup_reader(self):
+        if self._in is None:
+            from dvrip.monitor import Monitor, MonitorAction, MonitorClaim, DoMonitor, MonitorParams, Stream 
+            monitor = Monitor(action=MonitorAction.START, 
+                    params=MonitorParams(channel=self._channel, stream=Stream.HD))
+            claim = MonitorClaim(session=self._client.session, monitor=monitor)
+            request = DoMonitor(session=self._client.session, monitor=monitor)
+            self._in = self._client.reader(self._sock, claim, request)
+
+    @property
+    def should_poll(self) -> bool:
+        return False
 
     @property
     def model(self):
@@ -90,27 +110,26 @@ class XMEye_Camera(Camera):
     async def async_camera_image(self):
         """Return a still image response from the camera."""
 
-        #self._hass.async_create_task(async_reader_job(self._named_pipe, self._reader))
-
+        #self._hass.async_create_task(async_reader_job(self._named_pipe, self._in, self._hass))
+        
         from haffmpeg.tools import ImageFrame, IMAGE_JPEG
         ffmpeg = ImageFrame(self._ffmpeg_manager.binary, loop=self.hass.loop)
 
-        image = await asyncio.shield(ffmpeg.get_image(
+        image = asyncio.run_coroutine_threadsafe(ffmpeg.get_image(
             self._named_pipe, output_format=IMAGE_JPEG))
-        return image
+        return await image.result
 
-        
-async def async_reader_job(named_pipe, reader):
+def async_reader_job(named_pipe, reader, hass):
 
-    with open(named_pipe, 'wb') as out:
+     with open(named_pipe, mode = 'wb') as out:
         while True:
             try:
-                chunk = reader.read(16)
-                if not chunk:
-                    break
-                out.write(chunk)
-                out.flush()
+                file = reader()
+                try:
+                    copyfileobj(file, out, length=256)
+                    _LOGGER.info("Copied 256 bytes to pipe")
+                    out.flush()
+                except (BrokenPipeError, KeyboardInterrupt):
+                    pass
             finally:
                 pass
-                
-
